@@ -7,7 +7,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
-app.get("/", (_req, res) => res.send("Qura Meet Signaling Server running "));
+app.get("/", (_req, res) => res.send("Qura Meet Signaling Server running"));
 
 const server = http.createServer(app);
 
