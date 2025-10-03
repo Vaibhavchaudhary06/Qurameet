@@ -3,15 +3,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { socket, joinRoom, sendSignal } from "../services/signaling";
 
 /**
- * Notes:
- * - TURN/STUN envs (Xirsys ready):
- *   VITE_STUN_URL=stun:stun.l.google.com:19302
- *   VITE_TURN_URLS=turn:global.xirsys.net:80?transport=udp,turn:global.xirsys.net:3478?transport=udp,turns:global.xirsys.net:443?transport=tcp,turns:global.xirsys.net:5349?transport=tcp
- *   VITE_TURN_USERNAME=...
- *   VITE_TURN_CREDENTIAL=...
- *
- * - Signaling URL:
- *   VITE_SIGNALING_URL=http://<your-laptop-LAN-IP>:5174
+ * ENV (frontend):
+ *  VITE_SIGNALING_URL=https://qura-meet.onrender.com
+ *  VITE_STUN_URL=stun:stun.l.google.com:19302
+ *  VITE_TURN_URLS=turn:global.xirsys.net:80?transport=udp,turn:global.xirsys.net:3478?transport=udp,turns:global.xirsys.net:443?transport=tcp,turns:global.xirsys.net:5349?transport=tcp
+ *  VITE_TURN_USERNAME=...
+ *  VITE_TURN_CREDENTIAL=...
  */
 
 export default function useWebRTC(roomId) {
@@ -32,27 +29,24 @@ export default function useWebRTC(roomId) {
   const [camOn, setCamOn] = useState(true);
   const [isSharing, setIsSharing] = useState(false);
 
-  // Chat state (optional, if UI uses messages directly)
+  // Chat (optional)
   const [messages, setMessages] = useState([]); // [{from,user,text,ts}]
 
-  // ---- Presence / host ----
+  // Presence / host
   const [isHost, setIsHost] = useState(false);
-  const [peersMeta] = useState({}); // future: fill via presence events
+  const [peersMeta] = useState({});
 
-  // ---- Raise hand states ----
-  const [handsUp, setHandsUp] = useState({}); // { socketId: true/false }
+  // Raise hand
+  const [handsUp, setHandsUp] = useState({});
   const [myHandUp, setMyHandUp] = useState(false);
 
   // ---- ICE servers (Xirsys ready) ----
   const buildIceServers = () => {
-    const stun =
-      import.meta.env.VITE_STUN_URL || "stun:stun.l.google.com:19302";
-
+    const stun = import.meta.env.VITE_STUN_URL || "stun:stun.l.google.com:19302";
     const turnUrls = (import.meta.env.VITE_TURN_URLS || "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-
     const username = import.meta.env.VITE_TURN_USERNAME || "";
     const credential = import.meta.env.VITE_TURN_CREDENTIAL || "";
 
@@ -71,25 +65,28 @@ export default function useWebRTC(roomId) {
 
     const pc = new RTCPeerConnection({
       iceServers: buildIceServers(),
+      // test only: force relay
+      // iceTransportPolicy: "relay",
     });
+
+    // Pre-create m-lines so negotiation doesn’t stall when tracks are off
+    try {
+      pc.addTransceiver("audio", { direction: "sendrecv" });
+      pc.addTransceiver("video", { direction: "sendrecv" });
+    } catch {}
 
     pc.onicecandidate = (e) => {
       if (e.candidate && remoteId.current) {
-        sendSignal(remoteId.current, {
-          type: "candidate",
-          candidate: e.candidate,
-        });
+        sendSignal(remoteId.current, { type: "candidate", candidate: e.candidate });
       }
     };
 
     pc.ontrack = (e) => {
-      // first remote stream
       if (!remoteStream || e.streams[0] !== remoteStream) {
         setRemoteStream(e.streams[0]);
       }
     };
 
-    // Diagnostics (optional)
     pc.onconnectionstatechange = () => {
       console.log("[PC] state:", pc.connectionState);
     };
@@ -115,7 +112,6 @@ export default function useWebRTC(roomId) {
     if (sender) {
       sender.replaceTrack(track || null);
     } else if (track) {
-      // add first time
       pc.addTrack(track, new MediaStream([track]));
     }
   };
@@ -129,7 +125,7 @@ export default function useWebRTC(roomId) {
     setLocalStream(ms);
   };
 
-  // ---- chat send helper (used by UI) ----
+  // ---- chat send helper ----
   const sendMessage = (text) => {
     const t = String(text || "").trim();
     if (!t) return;
@@ -158,9 +154,7 @@ export default function useWebRTC(roomId) {
 
   const startCamera = useCallback(async () => {
     if (cameraTrackRef.current) return;
-    const s = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" },
-    });
+    const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
     const t = s.getVideoTracks()[0];
     cameraTrackRef.current = t;
     if (!isSharing) replaceSenderTrack("video", t);
@@ -181,10 +175,7 @@ export default function useWebRTC(roomId) {
   // ---- screen share ----
   const startScreenShare = async () => {
     try {
-      const ds = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
+      const ds = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       const track = ds.getVideoTracks()[0];
       if (!track) return;
       track.onended = () => stopScreenShare();
@@ -231,14 +222,11 @@ export default function useWebRTC(roomId) {
     setIsHost(false);
   }, []);
 
-  // Join room + start media first
+  // Join room + start media
   useEffect(() => {
     ensurePC();
-    // start media on mount (better before signaling to include tracks in SDP)
     startMic().catch(console.error);
     startCamera().catch(console.error);
-
-    // join (you can pass user meta if you want)
     joinRoom(roomId);
 
     return () => leave();
@@ -248,26 +236,40 @@ export default function useWebRTC(roomId) {
   // ---- signaling + socket events ----
   useEffect(() => {
     const onPeers = async (peers) => {
-      // you are host if room empty before you (peers.length === 0)
+      // First joiner becomes host (room empty before you)
       setIsHost(peers.length === 0);
 
+      // Caller path (we already have tracks ready)
       if (peers.length > 0) {
-        // For now only single remote (1:1)
         remoteId.current = peers[0];
-        const pc = ensurePC();
         try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          sendSignal(remoteId.current, { type: "offer", sdp: offer });
+          const pc = ensurePC();
+          if (pc.signalingState === "stable") {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            sendSignal(remoteId.current, { type: "offer", sdp: offer });
+            console.log("[SIGNAL] sent offer (onPeers) to", remoteId.current);
+          }
         } catch (e) {
-          console.warn("Offer failed", e);
+          console.warn("Offer (onPeers) failed", e);
         }
       }
     };
 
-    const onPeerJoined = (id) => {
-      // 2nd person joined -> they will send us offer or we will to them based on race; we already handle both paths
+    // 👈 FIX: make an offer as soon as someone joins you (host side)
+    const onPeerJoined = async (id) => {
       remoteId.current = id;
+      try {
+        const pc = ensurePC();
+        if (pc.signalingState === "stable" && !remoteStream) {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          sendSignal(id, { type: "offer", sdp: offer });
+          console.log("[SIGNAL] sent offer (onPeerJoined) to", id);
+        }
+      } catch (e) {
+        console.warn("onPeerJoined offer failed", e);
+      }
     };
 
     const onSignal = async ({ from, data }) => {
@@ -279,8 +281,10 @@ export default function useWebRTC(roomId) {
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           sendSignal(from, { type: "answer", sdp: answer });
+          console.log("[SIGNAL] answer sent to", from);
         } else if (data.type === "answer") {
           await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+          console.log("[SIGNAL] answer applied from", from);
         } else if (data.type === "candidate") {
           try {
             await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
@@ -335,7 +339,7 @@ export default function useWebRTC(roomId) {
       socket.off("host:muteall", onHostMuteAll);
       socket.off("chat:message", onChatMessage);
     };
-  }, [roomId, ensurePC]);
+  }, [roomId, ensurePC, remoteStream]);
 
   // ---- reactions (socket) ----
   const sendReaction = (emoji) => socket.emit("reaction", { roomId, emoji });
@@ -363,7 +367,7 @@ export default function useWebRTC(roomId) {
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [leave]);
 
-  // (optional) expose subscribe helpers for ChatPanel if needed
+  // (optional) subscribe helpers for ChatPanel
   const onChat = (cb) => socket.on("chat:message", cb);
   const offChat = (cb) => socket.off("chat:message", cb);
 
