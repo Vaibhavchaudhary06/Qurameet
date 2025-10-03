@@ -10,8 +10,23 @@ app.use(cors());
 app.get("/", (_req, res) => res.send("Qura Meet Signaling Server running ✅"));
 
 const server = http.createServer(app);
+
+// --- CORS allowlist (Render पर useful) ---
+const ALLOWED_ORIGINS = [
+  "https://qura-meetcom.vercel.app", // <- tumhara Vercel domain
+  "http://localhost:5173",
+  "https://localhost:5173",
+];
+
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // server-to-server / curl
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS blocked: " + origin), false);
+    },
+    methods: ["GET", "POST"],
+  },
 });
 
 // room state: { peers:Set<string>, hostId:string|null, users: Map<socketId, {name, avatar}> }
@@ -47,7 +62,7 @@ io.on("connection", (socket) => {
     const peers = [...state.peers].filter((id) => id !== socket.id);
     socket.emit("peers", peers);
 
-    // send presence snapshot
+    // presence snapshot
     socket.emit("presence:init", {
       hostId: state.hostId,
       users: Object.fromEntries(state.users),
@@ -55,8 +70,10 @@ io.on("connection", (socket) => {
 
     socket.join(roomId);
 
-    // notify others about the new peer
-    socket.to(roomId).emit("peer:joined", { id: socket.id, user });
+    // 👇 IMPORTANT: yahan sirf id bhejo (object nahi)
+    socket.to(roomId).emit("peer:joined", socket.id);
+
+    // presence update alag event me
     io.to(roomId).emit("presence:update", { type: "join", id: socket.id, user });
 
     console.log(`[JOIN] ${user.name} (${socket.id}) joined room ${roomId}`);
@@ -65,8 +82,9 @@ io.on("connection", (socket) => {
   // --- SIGNAL (offer/answer/candidate) ---
   socket.on("signal", ({ to, data }) => {
     if (!to || !data) return;
-    const state = currentRoom ? rooms.get(currentRoom) : null;
-    if (!state || !state.peers.has(to)) return;
+    if (!currentRoom) return;
+    const state = rooms.get(currentRoom);
+    if (!state || !state.peers.has(to)) return; // to must be a valid socket.id (string)
     io.to(to).emit("signal", { from: socket.id, data });
     console.log(`[SIGNAL] from ${socket.id} -> ${to} (${data.type || "candidate"})`);
   });
@@ -78,7 +96,7 @@ io.on("connection", (socket) => {
     if (!r || !text || !String(text).trim()) return;
 
     const now = Date.now();
-    if (now - lastChatAt < 250) return; // prevent spam (4 msgs/sec)
+    if (now - lastChatAt < 250) return; // basic rate-limit
     lastChatAt = now;
 
     const name = rooms.get(r)?.users.get(socket.id)?.name || "Guest";
@@ -115,7 +133,7 @@ io.on("connection", (socket) => {
     const r = roomId || currentRoom;
     if (!r) return;
     const state = rooms.get(r);
-    if (state?.hostId !== socket.id) return; // only host can do this
+    if (state?.hostId !== socket.id) return; // only host
     io.to(r).emit("host:muteall");
   });
 
@@ -126,7 +144,7 @@ io.on("connection", (socket) => {
     state?.peers.delete(socket.id);
     state?.users.delete(socket.id);
 
-    socket.to(currentRoom).emit("peer:left", { id: socket.id });
+    socket.to(currentRoom).emit("peer:left", socket.id);
     io.to(currentRoom).emit("presence:update", { type: "leave", id: socket.id });
 
     if (state && state.hostId === socket.id) {
@@ -147,7 +165,7 @@ io.on("connection", (socket) => {
     state?.peers.delete(socket.id);
     state?.users.delete(socket.id);
 
-    socket.to(currentRoom).emit("peer:left", { id: socket.id });
+    socket.to(currentRoom).emit("peer:left", socket.id);
     io.to(currentRoom).emit("presence:update", { type: "leave", id: socket.id });
 
     if (state && state.hostId === socket.id) {
@@ -162,4 +180,6 @@ io.on("connection", (socket) => {
 
 // --- START SERVER ---
 const PORT = process.env.PORT || 5174;
-server.listen(PORT, () => console.log("🚀 Signaling Server running on port", PORT));
+server.listen(PORT, () =>
+  console.log("🚀 Signaling Server running on port", PORT)
+);
