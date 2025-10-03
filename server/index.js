@@ -70,7 +70,7 @@ io.on("connection", (socket) => {
 
     socket.join(roomId);
 
-    // 👇 IMPORTANT: yahan sirf id bhejo (object nahi)
+    // IMPORTANT: yahan sirf id bhejo (object nahi)
     socket.to(roomId).emit("peer:joined", socket.id);
 
     // presence update alag event me
@@ -181,5 +181,5 @@ io.on("connection", (socket) => {
 // --- START SERVER ---
 const PORT = process.env.PORT || 5174;
 server.listen(PORT, () =>
-  console.log("🚀 Signaling Server running on port", PORT)
+  console.log(" Signaling Server running on port", PORT)
 );
